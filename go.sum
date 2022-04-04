@@ -1,0 +1,8 @@
+github.com/emersion/go-appdir v1.1.2 h1:3ceZKMz3b7MLy37ZB29shG2Y7Y3G/pcLbtnYP6BJ0eQ=
+github.com/emersion/go-appdir v1.1.2/go.mod h1:N15s1uA0vhxhVomEsNau6w15OdELRpp0aH1Ux4BuSPE=
+github.com/golang/glog v1.0.0 h1:nfP3RFugxnNRyKgeWd4oI1nYvXpxrx8ck8ZrcizshdQ=
+github.com/golang/glog v1.0.0/go.mod h1:EWib/APOK0SL3dFbYqvxE3UYd8E6s1ouQ7iEp/0LWV4=
+github.com/kettek/apng v0.0.0-20191108220231-414630eed80f h1:dnCYnTSltLuPMfc7dMrkz2uBUcEf/OFBR8yRh3oRT98=
+github.com/kettek/apng v0.0.0-20191108220231-414630eed80f/go.mod h1:x78/VRQYKuCftMWS0uK5e+F5RJ7S4gSlESRWI0Prl6Q=
+golang.org/x/sys v0.0.0-20201211090839-8ad439b19e0f h1:QdHQnPce6K4XQewki9WNbG5KOROuDzqO3NaYjI1cXJ0=
+golang.org/x/sys v0.0.0-20201211090839-8ad439b19e0f/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
