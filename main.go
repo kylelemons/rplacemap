@@ -32,7 +32,7 @@ var (
 )
 
 var (
-	// Full 2017 dataset, gzipped CSV
+	// Full 2017 dataset, CSV (~1GiB)
 	placeData2017 = &url.URL{
 		Scheme: "https",
 		Host:   "storage.googleapis.com",
@@ -94,9 +94,9 @@ func serve(records chan []dataset.Record) {
 
 	http.HandleFunc("/tiles/", tiles.Handler(records))
 
-	renderTimeline := timelapse.Handler(records)
-	http.HandleFunc("/render/timelapse.apng", renderTimeline)
-	http.HandleFunc("/render/timelapse.gif", renderTimeline)
+	renderTimelapse := timelapse.Handler(records)
+	http.HandleFunc("/render/timelapse.apng", renderTimelapse)
+	http.HandleFunc("/render/timelapse.gif", renderTimelapse)
 
 	http.Handle("/static/", static.Handler(*dev))
 	http.Handle("/", http.RedirectHandler("/static/index.html", http.StatusTemporaryRedirect))
