@@ -19,7 +19,7 @@ import (
 
 const Dimension = 1001
 
-func Handler(future chan []dataset.Record) http.HandlerFunc {
+func Handler(future chan []dataset.RawRecord) http.HandlerFunc {
 	var frames []*image.Paletted
 	ready := make(chan struct{})
 
@@ -76,7 +76,7 @@ func writeBuffer(w http.ResponseWriter, ctype string, buf *bytes.Buffer) {
 		float64(buf.Len())/(1<<20), ctype, time.Since(start).Truncate(time.Millisecond))
 }
 
-func renderFrames(records []dataset.Record, frameAggregation time.Duration) (frames []*image.Paletted) {
+func renderFrames(records []dataset.RawRecord, frameAggregation time.Duration) (frames []*image.Paletted) {
 	start := time.Now()
 	defer func() {
 		glog.Infof("Timelapse complete: rendered %d frames in %s",
@@ -103,7 +103,7 @@ func renderFrames(records []dataset.Record, frameAggregation time.Duration) (fra
 			Pix:     pixels,
 			Stride:  Dimension,
 			Rect:    image.Rect(0, 0, Dimension, Dimension),
-			Palette: dataset.Palette,
+			Palette: dataset.Palette2017,
 		})
 
 		// Clone for the next frame
@@ -134,7 +134,7 @@ func (w frame) Bounds() image.Rectangle {
 }
 
 func (w frame) At(x, y int) color.Color {
-	return dataset.Palette[w.PixelData[y][x]]
+	return dataset.Palette2017[w.PixelData[y][x]]
 }
 
 func writeAPNG(buf *bytes.Buffer, frames []*image.Paletted) {
@@ -172,7 +172,7 @@ func writeGIF(buf *bytes.Buffer, frames []*image.Paletted) {
 		Config: image.Config{
 			Width:      Dimension,
 			Height:     Dimension,
-			ColorModel: dataset.Palette,
+			ColorModel: dataset.Palette2017,
 		},
 	}
 

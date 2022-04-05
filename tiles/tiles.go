@@ -21,7 +21,7 @@ type tileData struct {
 	pixels [][]uint8
 }
 
-func (d *tileData) init(records []dataset.Record) {
+func (d *tileData) init(records []dataset.RawRecord) {
 	defer close(d.ready)
 
 	pixels := make([][]uint8, CanvasSize)
@@ -71,7 +71,7 @@ func (w window) At(x, y int) color.Color {
 	pY := y * GlobalScale / w.PixelScale
 
 	idx := w.PixelData[pY%CanvasSize][pX%CanvasSize]
-	return dataset.Palette[idx]
+	return dataset.Palette2017[idx]
 }
 
 var _ image.Image = new(window)
@@ -121,7 +121,7 @@ func (d *tileData) Handle(rw http.ResponseWriter, r *http.Request) {
 	writePNG(rw, win)
 }
 
-func Handler(records chan []dataset.Record) http.HandlerFunc {
+func Handler(records chan []dataset.RawRecord) http.HandlerFunc {
 	data := &tileData{
 		ready: make(chan struct{}),
 	}

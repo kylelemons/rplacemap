@@ -5,10 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"image/color"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,7 +18,7 @@ import (
 	"github.com/golang/glog"
 )
 
-type Record struct {
+type RawRecord struct {
 	UnixMillis int64
 	UserHash   [16]byte // pseudonymized user identifier
 	X, Y       int16    // coordinates, can represent +/-32k
@@ -32,7 +30,7 @@ const (
 	RequiredHeader = "ts,user_hash,x_coordinate,y_coordinate,color"
 )
 
-func Download(outputFile string, datasetURL *url.URL) ([]Record, error) {
+func Download2017(outputFile string, datasetURL *url.URL) (*Dataset, error) {
 	if !strings.HasSuffix(outputFile, FileSuffix) {
 		return nil, fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
 	}
@@ -81,7 +79,7 @@ func Download(outputFile string, datasetURL *url.URL) ([]Record, error) {
 	readBuffer := bufio.NewReaderSize(resp.Body, 10*1024)
 	lines := bufio.NewScanner(readBuffer)
 	var lineno int
-	var records []Record
+	var records []RawRecord
 	for lines.Scan() {
 		line := lines.Text()
 		processed += int64(len(line)) + 1 // count the newline that isn't returned
@@ -137,15 +135,12 @@ func Download(outputFile string, datasetURL *url.URL) ([]Record, error) {
 			return nil, fmt.Errorf("line %d: color %q invalid: %s", lineno, colorStr, err)
 		}
 
-		rec := Record{
+		rec := RawRecord{
 			UnixMillis: ts.UnixNano() / 1e6,
 			UserHash:   *((*[16]byte)(userHash)),
 			X:          int16(x),
 			Y:          int16(y),
 			Color:      uint8(color),
-		}
-		if err := enc.Encode(rec); err != nil {
-			return nil, fmt.Errorf("line %d: record %d: encoding record: %w", lineno, records, err)
 		}
 		records = append(records, rec)
 	}
@@ -157,6 +152,15 @@ func Download(outputFile string, datasetURL *url.URL) ([]Record, error) {
 	}
 	printProgress() // everyone likes the 100% downloaded bit :)
 
+	glog.Infof("Downloaded dataset (%d records, %.2fMiB, took %s)",
+		len(records), float64(total)/(1<<20), time.Since(start).Truncate(time.Second))
+
+	ds := NewDataset(records, Palette2017)
+
+	writeStart := time.Now()
+	if err := enc.Encode(ds); err != nil {
+		return nil, fmt.Errorf("writing dataset to %q: %w", outputFile, err)
+	}
 	compression.Comment = "r/place 2017 dataset"
 	if err := compression.Close(); err != nil {
 		return nil, fmt.Errorf("finalizing gzip data: %w", err)
@@ -167,16 +171,120 @@ func Download(outputFile string, datasetURL *url.URL) ([]Record, error) {
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("closing output file: %w", err) // contains filename
 	}
+	glog.Infof("Wrote dataset to file in %s", time.Since(writeStart).Truncate(time.Millisecond))
+	glog.Infof("  File: %s", outputFile)
 
-	sortByTime(records)
-	glog.Infof("Downloaded dataset (%.2fMiB, took %s)",
-		float64(total)/(1<<20), time.Since(start).Truncate(time.Second))
-	glog.Infof("  Wrote to: %s", outputFile)
-
-	return records, nil
+	return ds, nil
 }
 
-func Load(filename string) ([]Record, error) {
+const Version = "rplacemap-encoding-v1"
+
+type Dataset struct {
+	Version string // encoding version, should match Version
+
+	// Global data
+	Width, Height int           // Number of horizontal and vertical pixels
+	Palette       color.Palette // Color indices
+
+	// Encoding metadata
+	Epoch, End  time.Time  // Base time (t0) and final timestamp
+	ChunkStride int        // The number of chunks per row (to avoid repeated computation)
+	UserIDs     [][16]byte // User IDs by User Index
+
+	// Chunked data for localized processing
+	Chunks []Chunk // 256x256-pixel chunks
+}
+
+type Chunk struct {
+	Width, Height int // Width and Height of the chunk (since the edge chunks won't be complete)
+
+	Pixels [256][256][]PixelEvent // Ordered events grouped by pixel
+}
+
+type PixelEvent struct {
+	DeltaMillis int32 // Delta between Epoch and this event
+	UserIndex   int32 // Index into the user array
+	ColorIndex  uint8 // Palette color index
+}
+
+func NewDataset(records []RawRecord, palette color.Palette) *Dataset {
+	start := time.Now()
+	defer func() {
+		glog.Infof("Encoded dataset (%d records) in %s", len(records), time.Since(start).Truncate(time.Millisecond))
+	}()
+
+	sortByTime(records)
+
+	epoch := records[0].UnixMillis
+	end := records[len(records)-1].UnixMillis
+
+	var (
+		maxX, maxY = records[0].X, records[0].Y
+		users      = make(map[[16]byte]int)
+	)
+	for _, r := range records {
+		if r.X > maxX {
+			maxX = r.X
+		}
+		if r.Y > maxY {
+			maxY = r.Y
+		}
+		users[r.UserHash] = len(users)
+	}
+
+	// Collapse the user IDs
+	userIDs := make([][16]byte, len(users)+1)
+	for id, i := range users {
+		userIDs[i] = id
+	}
+
+	// Create the chunk array
+	chunkCols := int(maxX+255) / 256
+	chunkRows := int(maxY+255) / 256
+	chunks := make([]Chunk, chunkCols*chunkRows)
+	for i := range chunks {
+		c := &chunks[i]
+
+		c.Width = 256
+		c.Height = 256
+
+		if i%chunkCols == chunkCols-1 {
+			c.Width = int(maxX)%256 + 1
+		}
+		if i/chunkCols == chunkRows-1 {
+			c.Height = int(maxY)%256 + 1
+		}
+	}
+
+	// Store events in the chunks
+	for _, r := range records {
+		x, y := int(r.X/256), int(r.Y/256)
+		c := &chunks[y*chunkCols+x]
+
+		ev := PixelEvent{
+			DeltaMillis: int32(r.UnixMillis - epoch),
+			UserIndex:   int32(users[r.UserHash]),
+			ColorIndex:  r.Color,
+		}
+
+		col, row := uint8(r.X), uint8(r.Y) // implicitly % 256
+		c.Pixels[row][col] = append(c.Pixels[row][col], ev)
+	}
+
+	return &Dataset{
+		Version:     Version,
+		Width:       int(maxX + 1),
+		Height:      int(maxY + 1),
+		Palette:     palette,
+		Epoch:       time.UnixMilli(epoch),
+		End:         time.UnixMilli(end),
+		ChunkStride: chunkCols,
+		UserIDs:     userIDs,
+		Chunks:      chunks,
+	}
+}
+
+func Load(filename string) (*Dataset, error) {
 	if !strings.HasSuffix(filename, FileSuffix) {
 		return nil, fmt.Errorf("input file %q does not have required suffix %q", filename, FileSuffix)
 	}
@@ -196,23 +304,29 @@ func Load(filename string) ([]Record, error) {
 	dec := gob.NewDecoder(compression)
 
 	start := time.Now()
-	var records []Record
-	for {
-		var rec Record
-		if err := dec.Decode(&rec); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("decoding record %d: %w", len(records)+1, err)
-		}
-		records = append(records, rec)
+
+	var ds Dataset
+	if err := dec.Decode(&ds); err != nil {
+		return nil, fmt.Errorf("decoding dataset from %q: %w (run with --download to redownload)", filename, err)
+	}
+	if got, want := ds.Version, Version; got != want {
+		return nil, fmt.Errorf("version = %q, want %q (run with --download to redownload)", got, want)
 	}
 
-	sortByTime(records)
-	glog.Infof("Decoded %d records in %s", len(records), time.Since(start).Truncate(time.Millisecond))
-	return records, nil
+	var events int
+	for _, c := range ds.Chunks {
+		for _, row := range c.Pixels {
+			for _, ev := range row {
+				events += len(ev)
+			}
+		}
+	}
+
+	glog.Infof("Loaded %d events in %s", events, time.Since(start).Truncate(time.Millisecond))
+	return &ds, nil
 }
 
-func sortByTime(records []Record) {
+func sortByTime(records []RawRecord) {
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].UnixMillis < records[j].UnixMillis
 	})
@@ -220,7 +334,7 @@ func sortByTime(records []Record) {
 
 var progressBar = strings.Repeat("#", 50)
 
-var Palette = color.Palette{
+var Palette2017 = color.Palette{
 	0:  color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF},
 	1:  color.RGBA{R: 0xE4, G: 0xE4, B: 0xE4, A: 0xFF},
 	2:  color.RGBA{R: 0x88, G: 0x88, B: 0x88, A: 0xFF},
@@ -237,4 +351,9 @@ var Palette = color.Palette{
 	13: color.RGBA{R: 0x00, G: 0x00, B: 0xEA, A: 0xFF},
 	14: color.RGBA{R: 0xE0, G: 0x4A, B: 0xFF, A: 0xFF},
 	15: color.RGBA{R: 0x82, G: 0x00, B: 0x80, A: 0xFF},
+}
+
+func init() {
+	// Ensure RGBA can be used in color.Palette
+	gob.Register(color.RGBA{})
 }

@@ -45,24 +45,25 @@ func main() {
 	flag.Set("v", "2")
 	flag.Parse()
 
-	records := make(chan []dataset.Record, 1)
+	records := make(chan []dataset.RawRecord, 1)
 	go func() {
-		records <- loadRecords()
+		loadRecords()
+		//records <- loadRecords()
 	}()
 
 	serve(records)
 }
 
-func loadRecords() []dataset.Record {
+func loadRecords() *dataset.Dataset {
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		glog.Fatalf("Failed to create cache directory: %s", err)
 	}
 
 	datasetFile := filepath.Join(cacheDir, "place_data_2017.gob.gz")
-	var records []dataset.Record
+	var records *dataset.Dataset
 	if _, err := os.Stat(datasetFile); os.IsNotExist(err) || *download {
 		glog.Infof("No dataset found, downloading...")
-		recs, err := dataset.Download(datasetFile, placeData2017)
+		recs, err := dataset.Download2017(datasetFile, placeData2017)
 		if err != nil {
 			glog.Fatalf("Failed to download dataset: %s", err)
 		}
@@ -81,7 +82,7 @@ func loadRecords() []dataset.Record {
 	return records
 }
 
-func serve(records chan []dataset.Record) {
+func serve(records chan []dataset.RawRecord) {
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case recs := <-records:
