@@ -19,15 +19,14 @@ import (
 )
 
 type RawRecord struct {
-	UnixMillis int64
-	UserHash   [16]byte // pseudonymized user identifier
-	X, Y       int16    // coordinates, can represent +/-32k
-	Color      uint8    // 16-color palette
+	Timestamp time.Time
+	UserHash  string // pseudonymized user identifier
+	X, Y      int
+	Color     color.RGBA
 }
 
 const (
-	FileSuffix     = ".gob.gz"
-	RequiredHeader = "ts,user_hash,x_coordinate,y_coordinate,color"
+	FileSuffix = ".gob.gz"
 )
 
 func Download2017(outputFile string, datasetURL *url.URL) (*Dataset, error) {
@@ -195,8 +194,17 @@ type Dataset struct {
 	Chunks []Chunk // 256x256-pixel chunks
 }
 
+func (d *Dataset) add(rec RawRecord) {
+
+}
+
+func (d *Dataset) prepare() (*Dataset, error) {
+
+	return d, nil
+}
+
 type Chunk struct {
-	Width, Height int // Width and Height of the chunk (since the edge chunks won't be complete)
+	Width, Height int // Width and Height of the lines (since the edge chunks won't be complete)
 
 	Pixels [256][256][]PixelEvent // Ordered events grouped by pixel
 }
@@ -238,7 +246,7 @@ func NewDataset(records []RawRecord, palette color.Palette) *Dataset {
 		userIDs[i] = id
 	}
 
-	// Create the chunk array
+	// Create the lines array
 	chunkCols := int(maxX+255) / 256
 	chunkRows := int(maxY+255) / 256
 	chunks := make([]Chunk, chunkCols*chunkRows)
@@ -333,25 +341,6 @@ func sortByTime(records []RawRecord) {
 }
 
 var progressBar = strings.Repeat("#", 50)
-
-var Palette2017 = color.Palette{
-	0:  color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF},
-	1:  color.RGBA{R: 0xE4, G: 0xE4, B: 0xE4, A: 0xFF},
-	2:  color.RGBA{R: 0x88, G: 0x88, B: 0x88, A: 0xFF},
-	3:  color.RGBA{R: 0x22, G: 0x22, B: 0x22, A: 0xFF},
-	4:  color.RGBA{R: 0xFF, G: 0xA7, B: 0xD1, A: 0xFF},
-	5:  color.RGBA{R: 0xE5, G: 0x00, B: 0x00, A: 0xFF},
-	6:  color.RGBA{R: 0xE5, G: 0x95, B: 0x00, A: 0xFF},
-	7:  color.RGBA{R: 0xA0, G: 0x6A, B: 0x42, A: 0xFF},
-	8:  color.RGBA{R: 0xE5, G: 0xD9, B: 0x00, A: 0xFF},
-	9:  color.RGBA{R: 0x94, G: 0xE0, B: 0x44, A: 0xFF},
-	10: color.RGBA{R: 0x02, G: 0xBE, B: 0x01, A: 0xFF},
-	11: color.RGBA{R: 0x00, G: 0xE5, B: 0xF0, A: 0xFF},
-	12: color.RGBA{R: 0x00, G: 0x83, B: 0xC7, A: 0xFF},
-	13: color.RGBA{R: 0x00, G: 0x00, B: 0xEA, A: 0xFF},
-	14: color.RGBA{R: 0xE0, G: 0x4A, B: 0xFF, A: 0xFF},
-	15: color.RGBA{R: 0x82, G: 0x00, B: 0x80, A: 0xFF},
-}
 
 func init() {
 	// Ensure RGBA can be used in color.Palette
