@@ -68,7 +68,7 @@ func parseLine2022(line string) ([]RawRecord, error) {
 	}}, nil
 }
 
-const header2022 = ""
+const header2022 = "timestamp,user_id,pixel_color,coordinate"
 
 func parseColor(s string) (color.RGBA, error) {
 	if got, want := len(s), 7; got != want {

@@ -15,23 +15,20 @@ import (
 	"github.com/kettek/apng"
 
 	"github.com/kylelemons/rplacemap/dataset"
+	"github.com/kylelemons/rplacemap/internal/gsync"
 )
 
 const Dimension = 1001
 
-func Handler(future chan []dataset.RawRecord) http.HandlerFunc {
-	var frames []*image.Paletted
-	ready := make(chan struct{})
+func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
+	futureFrames := gsync.After(futureDataset, func(*dataset.Dataset) ([]*image.Paletted, error) {
+		// TODO: propagate the record refactor
+		return renderFrames(nil, 10*time.Minute), nil
+	})
+	_ = futureFrames
 
-	go func() {
-		defer close(ready)
-
-		records := <-future
-		future <- records
-
-		frames = renderFrames(records, 10*time.Minute)
-	}()
-
+	ready := make(chan bool)
+	frames := make([]*image.Paletted, 0)
 	var (
 		gifOnce sync.Once
 		gifData = new(bytes.Buffer)
@@ -87,15 +84,15 @@ func renderFrames(records []dataset.RawRecord, frameAggregation time.Duration) (
 
 	pending := records
 	for len(pending) > 0 {
-		endDeltaMillis := pending[0].UnixMillis + frameAggregation.Milliseconds()
+		endDeltaMillis := pending[0].Timestamp.Add(frameAggregation)
 		for len(pending) > 0 {
 			current := pending[0]
-			if current.UnixMillis >= endDeltaMillis {
+			if current.Timestamp.After(endDeltaMillis) {
 				break
 			}
 			pending = pending[1:]
 
-			pixels[int(current.Y)*Dimension+int(current.X)] = current.Color
+			pixels[int(current.Y)*Dimension+int(current.X)] = 0 // TODO: color index
 		}
 
 		// Create the frame
@@ -103,12 +100,13 @@ func renderFrames(records []dataset.RawRecord, frameAggregation time.Duration) (
 			Pix:     pixels,
 			Stride:  Dimension,
 			Rect:    image.Rect(0, 0, Dimension, Dimension),
-			Palette: dataset.Palette2017,
+			Palette: make(color.Palette, 16), // TODO: color palette
 		})
 
 		// Clone for the next frame
 		pixels = append([]uint8(nil), pixels...)
 	}
+	select {} // TODO: do something
 
 	// Freeze at the end for a little.
 	const TrailerFrames = 100
@@ -134,7 +132,7 @@ func (w frame) Bounds() image.Rectangle {
 }
 
 func (w frame) At(x, y int) color.Color {
-	return dataset.Palette2017[w.PixelData[y][x]]
+	return color.RGBA{} // TODO: color
 }
 
 func writeAPNG(buf *bytes.Buffer, frames []*image.Paletted) {
@@ -172,7 +170,7 @@ func writeGIF(buf *bytes.Buffer, frames []*image.Paletted) {
 		Config: image.Config{
 			Width:      Dimension,
 			Height:     Dimension,
-			ColorModel: dataset.Palette2017,
+			ColorModel: make(color.Palette, 16), // TODO: color palette
 		},
 	}
 

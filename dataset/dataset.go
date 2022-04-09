@@ -3,12 +3,10 @@ package dataset
 import (
 	"bufio"
 	"compress/gzip"
-	"context"
 	"encoding/gob"
 	"fmt"
 	"image/color"
 	"math"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -28,49 +26,6 @@ const (
 	FileSuffix = ".gob.gz"
 )
 
-func Download2017(outputFile string, datasetURL *url.URL) (*Dataset, error) {
-	if !strings.HasSuffix(outputFile, FileSuffix) {
-		return nil, fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
-	}
-
-	f, err := os.Create(outputFile)
-	if err != nil {
-		return nil, fmt.Errorf("creating output file: %w", err) // contains filename
-	}
-	defer f.Close() // double close OK
-
-	writeBuffer := bufio.NewWriterSize(f, 10*1024)
-	compression, err := gzip.NewWriterLevel(writeBuffer, gzip.BestCompression)
-	if err != nil {
-		glog.Fatalf("NewWriterlevel: %s", err) // should never happen, means our level was wrong
-	}
-	enc := gob.NewEncoder(compression)
-
-	ds, err := Download(context.TODO(), Dataset2017)
-	if err != nil {
-		return nil, fmt.Errorf("downloading: %s", err)
-	}
-
-	writeStart := time.Now()
-	if err := enc.Encode(ds); err != nil {
-		return nil, fmt.Errorf("writing dataset to %q: %w", outputFile, err)
-	}
-	compression.Comment = "r/place 2017 dataset"
-	if err := compression.Close(); err != nil {
-		return nil, fmt.Errorf("finalizing gzip data: %w", err)
-	}
-	if err := writeBuffer.Flush(); err != nil {
-		return nil, fmt.Errorf("flushing buffer to file %q: %w", outputFile, err)
-	}
-	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("closing output file: %w", err) // contains filename
-	}
-	glog.Infof("Wrote dataset to file in %s", time.Since(writeStart).Truncate(time.Millisecond))
-	glog.Infof("  File: %s", outputFile)
-
-	return ds, nil
-}
-
 const Version = "rplacemap-encoding-v2"
 
 type Dataset struct {
@@ -88,6 +43,50 @@ type Dataset struct {
 
 	// Chunked data for localized processing
 	Chunks []Chunk // 256x256-pixel chunks
+}
+
+func (d *Dataset) At(row, col int) []PixelEvent {
+	y, cy, x, cx := row/256, row%256, col/256, col%256
+	return d.Chunks[y*d.ChunkStride+x].Pixels[cy][cx]
+}
+
+func (d *Dataset) SaveTo(outputFile string) error {
+	if !strings.HasSuffix(outputFile, FileSuffix) {
+		return fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
+	}
+	glog.Infof("Saving dataset...")
+
+	f, err := os.Create(outputFile)
+	if err != nil {
+		return fmt.Errorf("creating output file: %w", err) // contains filename
+	}
+	defer f.Close() // double close OK
+
+	writeBuffer := bufio.NewWriterSize(f, 10*1024)
+	compression, err := gzip.NewWriterLevel(writeBuffer, gzip.BestCompression)
+	if err != nil {
+		glog.Fatalf("NewWriterlevel: %s", err) // should never happen, means our level was wrong
+	}
+	enc := gob.NewEncoder(compression)
+
+	writeStart := time.Now()
+	if err := enc.Encode(d); err != nil {
+		return fmt.Errorf("writing dataset to %q: %w", outputFile, err)
+	}
+	compression.Comment = fmt.Sprintf("r/place %s dataset", d.Epoch.Year())
+	if err := compression.Close(); err != nil {
+		return fmt.Errorf("finalizing gzip data: %w", err)
+	}
+	if err := writeBuffer.Flush(); err != nil {
+		return fmt.Errorf("flushing buffer to file %q: %w", outputFile, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing output file: %w", err) // contains filename
+	}
+	glog.Infof("Wrote dataset to file in %s", time.Since(writeStart).Truncate(time.Millisecond))
+	glog.Infof("  File: %s", outputFile)
+
+	return nil
 }
 
 type partialDataset struct {
@@ -151,6 +150,10 @@ func (d *partialDataset) finalize() {
 	for _, chunk := range d.Chunks {
 		for _, r := range chunk.Pixels {
 			for _, ev := range r {
+				if len(ev) == 0 {
+					continue
+				}
+
 				sort.Slice(ev, func(i, j int) bool {
 					if a, b := ev[i].DeltaMillis, ev[j].DeltaMillis; a != b {
 						return a < b
@@ -229,8 +232,6 @@ func Load(filename string) (*Dataset, error) {
 	glog.Infof("Loaded %d events in %s", events, time.Since(start).Truncate(time.Millisecond))
 	return &ds, nil
 }
-
-var progressBar = strings.Repeat("#", 50)
 
 func init() {
 	// Ensure RGBA can be used in color.Palette

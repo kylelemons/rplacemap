@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/kylelemons/rplacemap/dataset"
+	"github.com/kylelemons/rplacemap/internal/gsync"
 	"github.com/kylelemons/rplacemap/static"
 	"github.com/kylelemons/rplacemap/tiles"
 	"github.com/kylelemons/rplacemap/timelapse"
@@ -23,6 +25,7 @@ import (
 var (
 	download = flag.Bool("download", false, "Force re-download of r/place map data")
 	addr     = flag.String("http", "localhost:0", "HTTP serve address")
+	year     = flag.String("year", "2022", "Year to download / serve")
 
 	dev = flag.Bool("dev", false, "Don't use builtin assets")
 )
@@ -45,57 +48,79 @@ func main() {
 	flag.Set("v", "2")
 	flag.Parse()
 
-	records := make(chan []dataset.RawRecord, 1)
+	glog.Infof("Welcome to the r/place %s map explorer!", *year)
+
+	futureDataset := gsync.FutureOf[*dataset.Dataset]()
 	go func() {
-		loadRecords()
-		//records <- loadRecords()
+		if _, err := futureDataset.Provide(loadDataset()); err != nil {
+			glog.Fatalf("Failed to initialize: %s", err)
+		}
 	}()
 
-	serve(records)
+	serve(futureDataset)
 }
 
-func loadRecords() *dataset.Dataset {
+func loadDataset() (*dataset.Dataset, error) {
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		glog.Fatalf("Failed to create cache directory: %s", err)
+		return nil, fmt.Errorf("failed to create cache directory: %s", err)
 	}
 
-	datasetFile := filepath.Join(cacheDir, "place_data_2017.gob.gz")
-	var records *dataset.Dataset
+	file := fmt.Sprintf("place_data_%s%s", *year, dataset.FileSuffix)
+	var source dataset.Source
+	switch *year {
+	case "2017":
+		source = dataset.Dataset2017
+	case "2022":
+		source = dataset.Dataset2022
+	default:
+		return nil, fmt.Errorf("no known data source for --year=%s", *year)
+	}
+
+	datasetFile := filepath.Join(cacheDir, file)
+	var loaded *dataset.Dataset
 	if _, err := os.Stat(datasetFile); os.IsNotExist(err) || *download {
 		glog.Infof("No dataset found, downloading...")
-		recs, err := dataset.Download2017(datasetFile, placeData2017)
+		ds, err := dataset.Download(context.TODO(), source)
 		if err != nil {
-			glog.Fatalf("Failed to download dataset: %s", err)
+			return nil, fmt.Errorf("failed to download dataset: %s", err)
 		}
-		records = recs
+		go func() {
+			if err := ds.SaveTo(datasetFile); err != nil {
+				os.Remove(datasetFile) // best effort delete the corrupted file
+				glog.Warningf("Failed to cache dataset to file: %s", err)
+			}
+		}()
+		loaded = ds
 	} else if err != nil {
-		glog.Fatalf("Failed to check cache: %s", err)
+		return nil, fmt.Errorf("failed to check cache: %s", err)
 	} else {
 		glog.Infof("Loading cached dataset (--download to re-download)...")
 		glog.Infof("  File: %s", datasetFile)
-		recs, err := dataset.Load(datasetFile)
+		ds, err := dataset.Load(datasetFile)
 		if err != nil {
-			glog.Fatalf("Failed to load dataset: %s", err)
+			return nil, fmt.Errorf("failed to load dataset: %s", err)
 		}
-		records = recs
+		loaded = ds
 	}
-	return records
+	return loaded, nil
 }
 
-func serve(records chan []dataset.RawRecord) {
+func serve(futureDataset *gsync.Future[*dataset.Dataset]) {
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case recs := <-records:
-			records <- recs
-			fmt.Fprintf(w, "OK: %d records", len(records))
-		case <-time.After(1 * time.Second):
-			http.Error(w, "tiles not ready", http.StatusServiceUnavailable)
+		ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+		defer cancel()
+
+		if _, err := futureDataset.Wait(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
 		}
+
+		fmt.Fprintf(w, "OK")
 	})
 
-	http.HandleFunc("/tiles/", tiles.Handler(records))
+	http.HandleFunc("/tiles/", tiles.Handler(futureDataset))
 
-	renderTimelapse := timelapse.Handler(records)
+	renderTimelapse := timelapse.Handler(futureDataset)
 	http.HandleFunc("/render/timelapse.apng", renderTimelapse)
 	http.HandleFunc("/render/timelapse.gif", renderTimelapse)
 
@@ -107,6 +132,7 @@ func serve(records chan []dataset.RawRecord) {
 		glog.Exitf("Failed to listen on %q: %s", *addr, err)
 	}
 	glog.Infof("Serving HTTP on http://%s", lis.Addr())
+	glog.V(2).Infof(" - Debug: http://%s/debug/pprof", lis.Addr())
 
 	glog.Exitf("HTTP Serve exited: %s", http.Serve(lis, nil))
 }

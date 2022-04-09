@@ -2,6 +2,7 @@ package dataset
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"image/color"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+
+	"github.com/kylelemons/rplacemap/internal/progress"
 )
 
 const TimestampLayout = "2006-01-02 15:04:05.999 MST"
@@ -56,14 +59,17 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	start := time.Now()
+
 	type errorSource struct {
 		source int
 		err    error
 	}
 	var (
-		chunks = make(chan chunkSource, 2*len(src.URLs))
-		errors = make(chan errorSource, len(src.URLs))
-		done   = make(chan struct{})
+		chunks      = make(chan chunkSource, 2*len(src.URLs))
+		errors      = make(chan errorSource, len(src.URLs))
+		done        = make(chan struct{})
+		progressBar = new(progress.Bar)
 	)
 
 	var wg sync.WaitGroup
@@ -73,7 +79,7 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errors <- errorSource{i, src.download(ctx, i, u, chunks)}
+			errors <- errorSource{i, src.download(ctx, i, u, chunks, progressBar)}
 		}()
 	}
 	go func() {
@@ -97,6 +103,9 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 	}
 	defer prep.finalize()
 
+	printProgress := time.NewTicker(5 * time.Second)
+	defer printProgress.Stop()
+
 	var (
 		processed         int
 		sourceLineNumbers = make([]int, len(src.URLs))
@@ -104,15 +113,19 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 	for {
 		select {
 		case <-done:
+			// Everybody loves the 100% bar :)
+			glog.Infof("Progress: %s", progressBar)
+			glog.Infof("Download complete after %s", time.Since(start).Truncate(time.Second))
 			return &out, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-printProgress.C:
+			glog.Infof("Progress: %s", progressBar)
 		case es := <-errors:
 			if err := es.err; err != nil {
 				return nil, fmt.Errorf("download[%d]: %w", es.source, err)
 			}
 		case chunk := <-chunks:
-			glog.V(1).Infof("[%02d] Processing %d-line chunk", chunk.source, len(chunk.lines))
 			for _, line := range chunk.lines {
 				records, err := src.ParseLine(line)
 				if err != nil {
@@ -129,7 +142,7 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 	}
 }
 
-func (s *Source) download(ctx context.Context, source int, u *url.URL, chunks chan chunkSource) error {
+func (s *Source) download(ctx context.Context, source int, u *url.URL, chunks chan chunkSource, bar *progress.Bar) error {
 	start := time.Now()
 	req := &http.Request{Method: http.MethodGet, URL: u}
 	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
@@ -144,37 +157,35 @@ func (s *Source) download(ctx context.Context, source int, u *url.URL, chunks ch
 	if resp.ContentLength <= 0 {
 		return fmt.Errorf("GET %q returned unknown Content-Length", u)
 	}
-	glog.Infof("[%02d] Starting download of %q", source, u)
+	glog.V(1).Infof("[%02d] Starting download of %q", source, u)
 
 	// Spread out downloads and logs a tiny bit
 	time.Sleep(time.Duration(source) * 50 * time.Millisecond)
 
-	// Progress updates:
-	//   Print a progress update periodically.
-	//   We should be loading a static file, so content length should be provided.
-	var processed, total int64 = 0, resp.ContentLength
-	progress := time.NewTicker(5 * time.Second)
-	defer progress.Stop()
-	printProgress := func() {
-		percent := processed * 100 / total
-		glog.Infof("[%02d] Progress: %3d%% [% -50s]", source, percent, progressBar[:percent/2])
+	// Count the bytes read off the wire against the ContentLength
+	reader := bar.Wrap(resp.Body, resp.ContentLength)
+
+	// Buffer our reads for better performance
+	reader = bufio.NewReaderSize(reader, 10*1024)
+
+	// Decompress if requested
+	if s.GZipped {
+		zr, err := gzip.NewReader(reader)
+		if err != nil {
+			return fmt.Errorf("initializing decompression: %s", err)
+		}
+		defer zr.Close()
+		reader = zr
 	}
 
-	readBuffer := bufio.NewReaderSize(resp.Body, 10*1024)
-	lines := bufio.NewScanner(readBuffer)
+	// Scan for and discard newlines for easier processing
+	lines := bufio.NewScanner(reader)
 
 	var lineno int
 	var pending []string
 	for lines.Scan() {
 		line := lines.Text()
-		processed += int64(len(line)) + 1 // count the newline that isn't returned
 		lineno++
-
-		select {
-		case <-progress.C:
-			printProgress()
-		default:
-		}
 
 		if lineno == 1 && line == s.Header {
 			glog.V(3).Infof("[%02d] Header: %q", source, line)
@@ -197,13 +208,9 @@ func (s *Source) download(ctx context.Context, source int, u *url.URL, chunks ch
 	if err := lines.Err(); err != nil {
 		return fmt.Errorf("downloading %q: %w", u, err)
 	}
-	printProgress() // everyone likes the 100% downloaded bit :)
-	if processed != total {
-		glog.Warningf("[%02d] Processed %d/%d bytes; incomplete download?", source, processed, total)
-	}
 
-	glog.Infof("[%02d] Downloaded complete (%d records, %.2fMiB, took %s)", source,
-		lineno, float64(total)/(1<<20), time.Since(start).Truncate(time.Second))
+	glog.V(1).Infof("[%02d] Shard downloaded (%d records, %.2fMiB, took %s)", source,
+		lineno, float64(resp.ContentLength)/(1<<20), time.Since(start).Truncate(time.Second))
 
 	return nil
 }
