@@ -13,7 +13,7 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/kylelemons/rplacemap/internal/progress"
+	"github.com/kylelemons/rplacemap/v2/internal/progress"
 )
 
 const TimestampLayout = "2006-01-02 15:04:05.999 MST"

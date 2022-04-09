@@ -15,11 +15,11 @@ import (
 	"github.com/emersion/go-appdir"
 	"github.com/golang/glog"
 
-	"github.com/kylelemons/rplacemap/dataset"
-	"github.com/kylelemons/rplacemap/internal/gsync"
-	"github.com/kylelemons/rplacemap/static"
-	"github.com/kylelemons/rplacemap/tiles"
-	"github.com/kylelemons/rplacemap/timelapse"
+	"github.com/kylelemons/rplacemap/v2/dataset"
+	"github.com/kylelemons/rplacemap/v2/internal/gsync"
+	"github.com/kylelemons/rplacemap/v2/static"
+	"github.com/kylelemons/rplacemap/v2/tiles"
+	"github.com/kylelemons/rplacemap/v2/timelapse"
 )
 
 var (

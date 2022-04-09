@@ -11,8 +11,8 @@ import (
 
 	"github.com/golang/glog"
 
-	"github.com/kylelemons/rplacemap/dataset"
-	"github.com/kylelemons/rplacemap/internal/gsync"
+	"github.com/kylelemons/rplacemap/v2/dataset"
+	"github.com/kylelemons/rplacemap/v2/internal/gsync"
 )
 
 type window struct {

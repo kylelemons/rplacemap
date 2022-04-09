@@ -14,8 +14,8 @@ import (
 	"github.com/golang/glog"
 	"github.com/kettek/apng"
 
-	"github.com/kylelemons/rplacemap/dataset"
-	"github.com/kylelemons/rplacemap/internal/gsync"
+	"github.com/kylelemons/rplacemap/v2/dataset"
+	"github.com/kylelemons/rplacemap/v2/internal/gsync"
 )
 
 const Dimension = 1001
