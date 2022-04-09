@@ -3,15 +3,14 @@ package dataset
 import (
 	"bufio"
 	"compress/gzip"
-	"encoding/base64"
+	"context"
 	"encoding/gob"
 	"fmt"
 	"image/color"
-	"net/http"
+	"math"
 	"net/url"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,8 +33,6 @@ func Download2017(outputFile string, datasetURL *url.URL) (*Dataset, error) {
 		return nil, fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
 	}
 
-	// TODO: write to tempfile and then move?
-
 	f, err := os.Create(outputFile)
 	if err != nil {
 		return nil, fmt.Errorf("creating output file: %w", err) // contains filename
@@ -49,112 +46,10 @@ func Download2017(outputFile string, datasetURL *url.URL) (*Dataset, error) {
 	}
 	enc := gob.NewEncoder(compression)
 
-	start := time.Now()
-	resp, err := http.DefaultClient.Get(datasetURL.String())
+	ds, err := Download(context.TODO(), Dataset2017)
 	if err != nil {
-		return nil, fmt.Errorf("starting download of %q: %w", datasetURL, err)
+		return nil, fmt.Errorf("downloading: %s", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %q returned %q", datasetURL, resp.Status)
-	}
-	if resp.ContentLength <= 0 {
-		return nil, fmt.Errorf("GET %q returned unknown Content-Length", datasetURL)
-	}
-	glog.Infof("Starting download of %q", datasetURL)
-
-	// Progress updates:
-	//   Print a progress update periodically.
-	//   We should be loading a static file, so content length should be provided.
-	var processed, total int64 = 0, resp.ContentLength
-	progress := time.NewTicker(3 * time.Second)
-	defer progress.Stop()
-	printProgress := func() {
-		percent := processed * 100 / total
-		glog.Infof("Progress: %3d%% [% -50s]", percent, progressBar[:percent/2])
-	}
-
-	readBuffer := bufio.NewReaderSize(resp.Body, 10*1024)
-	lines := bufio.NewScanner(readBuffer)
-	var lineno int
-	var records []RawRecord
-	for lines.Scan() {
-		line := lines.Text()
-		processed += int64(len(line)) + 1 // count the newline that isn't returned
-		lineno++
-
-		select {
-		case <-progress.C:
-			printProgress()
-		default:
-		}
-
-		if lineno == 1 {
-			if got, want := line, RequiredHeader; got != want {
-				return nil, fmt.Errorf("header mismatch, dataset contains %q, expecting %q", got, want)
-			}
-			glog.V(3).Infof("Header: %q", line)
-			continue
-		}
-
-		fields := strings.Split(line, ",")
-		if got, want := len(fields), 5; got != want {
-			return nil, fmt.Errorf("line %d: columns = %v, want %v: line %q", lineno, got, want, line)
-		}
-		var (
-			tsStr       = fields[0]
-			userHashStr = fields[1]
-			xStr, yStr  = fields[2], fields[3]
-			colorStr    = fields[4]
-		)
-		if len(xStr) == 0 || len(yStr) == 0 || len(colorStr) == 0 {
-			continue
-		}
-
-		const TimestampLayout = "2006-01-02 15:04:05.999 MST"
-		ts, err := time.Parse(TimestampLayout, tsStr)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: timestamp %q invalid: %s", lineno, tsStr, err)
-		}
-		userHash, err := base64.StdEncoding.DecodeString(userHashStr)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: user hash %q invalid: %s", lineno, userHashStr, err)
-		}
-		x, err := strconv.ParseInt(xStr, 10, 16)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: x coordinate %q invalid: %s", lineno, xStr, err)
-		}
-		y, err := strconv.ParseInt(yStr, 10, 16)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: y coordinate %q invalid: %s", lineno, yStr, err)
-		}
-		color, err := strconv.ParseUint(colorStr, 10, 8)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: color %q invalid: %s", lineno, colorStr, err)
-		}
-
-		rec := RawRecord{
-			UnixMillis: ts.UnixNano() / 1e6,
-			UserHash:   *((*[16]byte)(userHash)),
-			X:          int16(x),
-			Y:          int16(y),
-			Color:      uint8(color),
-		}
-		records = append(records, rec)
-	}
-	if err := lines.Err(); err != nil {
-		return nil, fmt.Errorf("downloading %q: %w", datasetURL, err)
-	}
-	if processed != total {
-		glog.Warningf("Processed %d/%d bytes; incomplete download?", processed, total)
-	}
-	printProgress() // everyone likes the 100% downloaded bit :)
-
-	glog.Infof("Downloaded dataset (%d records, %.2fMiB, took %s)",
-		len(records), float64(total)/(1<<20), time.Since(start).Truncate(time.Second))
-
-	ds := NewDataset(records, Palette2017)
 
 	writeStart := time.Now()
 	if err := enc.Encode(ds); err != nil {
@@ -176,7 +71,7 @@ func Download2017(outputFile string, datasetURL *url.URL) (*Dataset, error) {
 	return ds, nil
 }
 
-const Version = "rplacemap-encoding-v1"
+const Version = "rplacemap-encoding-v2"
 
 type Dataset struct {
 	Version string // encoding version, should match Version
@@ -186,21 +81,99 @@ type Dataset struct {
 	Palette       color.Palette // Color indices
 
 	// Encoding metadata
-	Epoch, End  time.Time  // Base time (t0) and final timestamp
-	ChunkStride int        // The number of chunks per row (to avoid repeated computation)
-	UserIDs     [][16]byte // User IDs by User Index
+	Epoch       time.Time // Base time (t0)
+	Start, End  time.Time // First and final pixel place timestamp
+	ChunkStride int       // The number of chunks per row (to avoid repeated computation)
+	UserIDs     []string  // User IDs by User Index
 
 	// Chunked data for localized processing
 	Chunks []Chunk // 256x256-pixel chunks
 }
 
-func (d *Dataset) add(rec RawRecord) {
-
+type partialDataset struct {
+	*Dataset
+	users  map[string]int
+	colors map[color.RGBA]int
 }
 
-func (d *Dataset) prepare() (*Dataset, error) {
+func (d *partialDataset) add(rec RawRecord) {
+	if rec.Timestamp.After(d.End) {
+		d.End = rec.Timestamp
+	}
+	if _, ok := d.colors[rec.Color]; !ok {
+		d.colors[rec.Color] = len(d.colors)
+	}
+	if _, ok := d.users[rec.UserHash]; !ok {
+		d.users[rec.UserHash] = len(d.users)
+	}
 
-	return d, nil
+	x, y := rec.X/256, rec.Y/256
+	c := &d.Chunks[y*d.ChunkStride+x]
+
+	ev := PixelEvent{
+		DeltaMillis: int32(rec.Timestamp.Sub(d.Epoch).Milliseconds()),
+		UserIndex:   int32(d.users[rec.UserHash]),
+		ColorIndex:  uint8(d.colors[rec.Color]),
+	}
+
+	col, row := uint8(rec.X), uint8(rec.Y) // implicitly % 256
+	c.Pixels[row][col] = append(c.Pixels[row][col], ev)
+}
+
+func (d *partialDataset) finalize() {
+	start := time.Now()
+	defer func() {
+		glog.Infof("Dataset finalized in %s", time.Since(start).Truncate(time.Millisecond))
+	}()
+
+	// Sanity checks
+	if got, max := len(d.colors), 256; got > max {
+		glog.Fatalf("Color palette (%d) exceeds one byte (%d)", got, max)
+	}
+
+	// Prepare the lookup tables
+	d.UserIDs = make([]string, len(d.users))
+	for u, i := range d.users {
+		d.UserIDs[i] = u
+	}
+	d.Palette = make(color.Palette, len(d.colors))
+	for c, i := range d.colors {
+		d.Palette[i] = c
+	}
+
+	// Stats
+	var (
+		totalEvents int
+		first       int32 = math.MaxInt32
+	)
+
+	// Sort the events
+	for _, chunk := range d.Chunks {
+		for _, r := range chunk.Pixels {
+			for _, ev := range r {
+				sort.Slice(ev, func(i, j int) bool {
+					if a, b := ev[i].DeltaMillis, ev[j].DeltaMillis; a != b {
+						return a < b
+					}
+					return false
+				})
+				totalEvents += len(r)
+				if ts := ev[0].DeltaMillis; ts < first {
+					first = ts
+				}
+			}
+		}
+	}
+
+	d.Start = d.Epoch.Add(time.Duration(first) * time.Millisecond)
+
+	glog.Infof("Dataset statistics:")
+	glog.Infof("  % 7d pixels placed", totalEvents)
+	glog.Infof("  % 7d users recorded", len(d.UserIDs))
+	glog.Infof("Event timestamps:")
+	glog.Infof("  Epoch:       %s", d.Epoch)
+	glog.Infof("  First Pixel: %s", d.Start)
+	glog.Infof("  Final Pixel: %s", d.End)
 }
 
 type Chunk struct {
@@ -213,83 +186,6 @@ type PixelEvent struct {
 	DeltaMillis int32 // Delta between Epoch and this event
 	UserIndex   int32 // Index into the user array
 	ColorIndex  uint8 // Palette color index
-}
-
-func NewDataset(records []RawRecord, palette color.Palette) *Dataset {
-	start := time.Now()
-	defer func() {
-		glog.Infof("Encoded dataset (%d records) in %s", len(records), time.Since(start).Truncate(time.Millisecond))
-	}()
-
-	sortByTime(records)
-
-	epoch := records[0].UnixMillis
-	end := records[len(records)-1].UnixMillis
-
-	var (
-		maxX, maxY = records[0].X, records[0].Y
-		users      = make(map[[16]byte]int)
-	)
-	for _, r := range records {
-		if r.X > maxX {
-			maxX = r.X
-		}
-		if r.Y > maxY {
-			maxY = r.Y
-		}
-		users[r.UserHash] = len(users)
-	}
-
-	// Collapse the user IDs
-	userIDs := make([][16]byte, len(users)+1)
-	for id, i := range users {
-		userIDs[i] = id
-	}
-
-	// Create the lines array
-	chunkCols := int(maxX+255) / 256
-	chunkRows := int(maxY+255) / 256
-	chunks := make([]Chunk, chunkCols*chunkRows)
-	for i := range chunks {
-		c := &chunks[i]
-
-		c.Width = 256
-		c.Height = 256
-
-		if i%chunkCols == chunkCols-1 {
-			c.Width = int(maxX)%256 + 1
-		}
-		if i/chunkCols == chunkRows-1 {
-			c.Height = int(maxY)%256 + 1
-		}
-	}
-
-	// Store events in the chunks
-	for _, r := range records {
-		x, y := int(r.X/256), int(r.Y/256)
-		c := &chunks[y*chunkCols+x]
-
-		ev := PixelEvent{
-			DeltaMillis: int32(r.UnixMillis - epoch),
-			UserIndex:   int32(users[r.UserHash]),
-			ColorIndex:  r.Color,
-		}
-
-		col, row := uint8(r.X), uint8(r.Y) // implicitly % 256
-		c.Pixels[row][col] = append(c.Pixels[row][col], ev)
-	}
-
-	return &Dataset{
-		Version:     Version,
-		Width:       int(maxX + 1),
-		Height:      int(maxY + 1),
-		Palette:     palette,
-		Epoch:       time.UnixMilli(epoch),
-		End:         time.UnixMilli(end),
-		ChunkStride: chunkCols,
-		UserIDs:     userIDs,
-		Chunks:      chunks,
-	}
 }
 
 func Load(filename string) (*Dataset, error) {
@@ -332,12 +228,6 @@ func Load(filename string) (*Dataset, error) {
 
 	glog.Infof("Loaded %d events in %s", events, time.Since(start).Truncate(time.Millisecond))
 	return &ds, nil
-}
-
-func sortByTime(records []RawRecord) {
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].UnixMillis < records[j].UnixMillis
-	})
 }
 
 var progressBar = strings.Repeat("#", 50)
