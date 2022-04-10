@@ -11,7 +11,7 @@ import (
 )
 
 func urls2022() []*url.URL {
-	urls := make([]*url.URL, 78)
+	urls := make([]*url.URL, 79)
 	for i := range urls {
 		urls[i] = &url.URL{
 			Scheme: "https",

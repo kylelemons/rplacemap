@@ -32,8 +32,8 @@ type Dataset struct {
 	Version string // encoding version, should match Version
 
 	// Global data
-	Width, Height int           // Number of horizontal and vertical pixels
-	Palette       color.Palette // Color indices
+	Size    int           // Number of horizontal and vertical pixels
+	Palette color.Palette // Color indices
 
 	// Encoding metadata
 	Epoch       time.Time // Base time (t0)
@@ -63,10 +63,13 @@ func (d *Dataset) SaveTo(outputFile string) error {
 	defer f.Close() // double close OK
 
 	writeBuffer := bufio.NewWriterSize(f, 10*1024)
+
 	compression, err := gzip.NewWriterLevel(writeBuffer, gzip.BestCompression)
 	if err != nil {
 		glog.Fatalf("NewWriterlevel: %s", err) // should never happen, means our level was wrong
 	}
+	defer compression.Close()
+
 	enc := gob.NewEncoder(compression)
 
 	writeStart := time.Now()
@@ -170,13 +173,21 @@ func (d *partialDataset) finalize() {
 
 	d.Start = d.Epoch.Add(time.Duration(first) * time.Millisecond)
 
-	glog.Infof("Dataset statistics:")
-	glog.Infof("  % 7d pixels placed", totalEvents)
-	glog.Infof("  % 7d users recorded", len(d.UserIDs))
-	glog.Infof("Event timestamps:")
+	logSummary(d.Dataset, totalEvents)
+}
+
+func logSummary(d *Dataset, totalEvents int) {
+	glog.Infof("Event details:")
 	glog.Infof("  Epoch:       %s", d.Epoch)
 	glog.Infof("  First Pixel: %s", d.Start)
 	glog.Infof("  Final Pixel: %s", d.End)
+	glog.Infof("Canvas information:")
+	glog.Infof("  Canvas:  %d x %d pixels", d.Size, d.Size)
+	glog.Infof("  Palette: %d colors", len(d.Palette))
+	glog.Infof("  Chunks:  %d chunks (%d x %d)", len(d.Chunks), d.ChunkStride, d.ChunkStride)
+	glog.Infof("Dataset statistics:")
+	glog.Infof("  % 7d pixels placed", totalEvents)
+	glog.Infof("  % 7d users recorded", len(d.UserIDs))
 }
 
 type Chunk struct {
@@ -211,6 +222,9 @@ func Load(filename string) (*Dataset, error) {
 	dec := gob.NewDecoder(compression)
 
 	start := time.Now()
+	defer func() {
+		glog.Infof("Dataset loaded in %s", time.Since(start).Truncate(time.Millisecond))
+	}()
 
 	var ds Dataset
 	if err := dec.Decode(&ds); err != nil {
@@ -229,7 +243,7 @@ func Load(filename string) (*Dataset, error) {
 		}
 	}
 
-	glog.Infof("Loaded %d events in %s", events, time.Since(start).Truncate(time.Millisecond))
+	logSummary(&ds, events)
 	return &ds, nil
 }
 

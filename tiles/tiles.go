@@ -22,6 +22,7 @@ type window struct {
 	TileX, TileY          int
 	TileWidth, TileHeight int
 	PixelScale            int
+	GlobalScale           int
 }
 
 func (w window) ColorModel() color.Model {
@@ -43,11 +44,9 @@ func clamp(v, max int) int {
 	return v
 }
 
-const GlobalScale = 4
-
 func (w window) At(x, y int) color.Color {
-	pX := x * GlobalScale / w.PixelScale
-	pY := y * GlobalScale / w.PixelScale
+	pX := x * w.GlobalScale / w.PixelScale
+	pY := y * w.GlobalScale / w.PixelScale
 
 	idx := w.PixelData[pY%w.Size][pX%w.Size]
 	return w.Palette[idx]
@@ -58,12 +57,29 @@ var _ image.Image = new(window)
 var tilePath = regexp.MustCompile(`^/tiles/(\d+)_(\d+)_z(\d+)_(\d+)x(\d+).png$`)
 
 type tileData struct {
-	pixels  [][]uint8
-	palette color.Palette
+	pixels      [][]uint8
+	palette     color.Palette
+	globalScale int
 }
 
 func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
 	futurePixels := gsync.After(futureDataset, func(ds *dataset.Dataset) (d tileData, err error) {
+		var lastNonwhitePixel int32
+		for _, chunk := range ds.Chunks {
+			for _, row := range chunk.Pixels {
+				for _, events := range row {
+					for _, ev := range events {
+						if ev.ColorIndex > 2 { // transp, black, white
+							if ev.DeltaMillis > lastNonwhitePixel {
+								lastNonwhitePixel = ev.DeltaMillis
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Make an image that is a perfect multiple of 256, since that's what is expected by Leaflet
 		size := ds.ChunkStride * 256
 		pixels := make([][]uint8, size)
 		for r := range pixels {
@@ -73,11 +89,20 @@ func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
 				if len(ev) == 0 {
 					continue
 				}
-				pixels[r][c] = ev[len(ev)-1].ColorIndex
+				for i := len(ev) - 1; i >= 0; i-- {
+					if ev[i].DeltaMillis > lastNonwhitePixel {
+						// Ignore pixel set events after "the whitening"
+						continue
+					}
+					pixels[r][c] = ev[i].ColorIndex
+					break
+				}
 			}
 		}
 		d.pixels = pixels
 		d.palette = ds.Palette
+
+		d.globalScale = ds.ChunkStride // works because chunks are also 256x256
 
 		glog.Infof("Tile data ready (%dx%d)", size, size)
 		return d, nil
@@ -88,7 +113,7 @@ func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
 			http.Error(rw, "not found", http.StatusNotFound)
 			return
 		}
-		glog.V(1).Infof("Serving %q", r.URL.Path)
+		glog.V(2).Infof("Serving %q", r.URL.Path)
 
 		data, err := futurePixels.Wait(r.Context())
 		if err != nil {
@@ -114,14 +139,15 @@ func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
 		}
 
 		win := &window{
-			Size:       len(data.pixels),
-			PixelData:  data.pixels,
-			Palette:    data.palette,
-			TileX:      x,
-			TileY:      y,
-			TileWidth:  w,
-			TileHeight: h,
-			PixelScale: 1 << z,
+			Size:        len(data.pixels),
+			PixelData:   data.pixels,
+			Palette:     data.palette,
+			TileX:       x,
+			TileY:       y,
+			TileWidth:   w,
+			TileHeight:  h,
+			PixelScale:  1 << z,
+			GlobalScale: data.globalScale,
 		}
 		writePNG(rw, win)
 	}

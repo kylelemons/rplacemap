@@ -8,10 +8,29 @@ import (
 	"sync"
 )
 
+type Type int
+
+const (
+	Counter Type = iota
+	Bytes
+)
+
 type Bar struct {
 	mu       sync.Mutex
 	progress int64
 	total    int64
+	typ      Type
+}
+
+func NewBar(typ Type) *Bar {
+	return &Bar{typ: typ}
+}
+
+func (b *Bar) DisplayAs(typ Type) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.typ = typ
 }
 
 func (b *Bar) AddProgress(amount int64) {
@@ -53,23 +72,27 @@ func (b *Bar) String() string {
 		offset = 50
 	}
 
-	// This works well for non-size_t style progress:
-	// width := int(math.Ceil(math.Log10(float64(total + 1))))
-	// return fmt.Sprintf("%3d%% [%s] %*d/%d", percent, bar[offset:][:50], width, progress, total)
+	switch b.typ {
+	case Bytes:
+		div, unit := 1<<20, "MiB"
+		if total > 1<<30 {
+			div, unit = 1<<30, "GiB"
+		}
 
-	div, unit := 1<<20, "MiB"
-	if total > 1<<30 {
-		div, unit = 1<<30, "GiB"
+		var (
+			progressMiB = float64(progress) / float64(div)
+			totalMiB    = float64(total) / float64(div)
+		)
+
+		width := int(math.Ceil(math.Log10(totalMiB))) + 3 // count ".00"
+		return fmt.Sprintf("%3d%% [%s] %*.2f/%.2f %s",
+			percent, bar[offset:][:50], width, progressMiB, totalMiB, unit)
+	case Counter:
+		width := int(math.Ceil(math.Log10(float64(total + 1))))
+		return fmt.Sprintf("%3d%% [%s] %*d/%d", percent, bar[offset:][:50], width, progress, total)
+	default:
+		return fmt.Sprintf("%d%% %d/%d (unknown progress bar type %d)", percent, progress, total, b.typ)
 	}
-
-	var (
-		progressMiB = float64(progress) / float64(div)
-		totalMiB    = float64(total) / float64(div)
-	)
-
-	width := int(math.Ceil(math.Log10(totalMiB))) + 3 // count ".00"
-	return fmt.Sprintf("%3d%% [%s] %*.2f/%.2f %s",
-		percent, bar[offset:][:50], width, progressMiB, totalMiB, unit)
 }
 
 func (b *Bar) Wrap(r io.Reader, size int64) io.Reader {

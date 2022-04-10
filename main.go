@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,18 +33,9 @@ var (
 	cacheDir = appdir.New("rplacemap").UserCache()
 )
 
-var (
-	// Full 2017 dataset, CSV (~1GiB)
-	placeData2017 = &url.URL{
-		Scheme: "https",
-		Host:   "storage.googleapis.com",
-		Path:   "/justin_bassett/place_tiles",
-	}
-)
-
 func main() {
 	flag.Set("logtostderr", "true")
-	flag.Set("v", "2")
+	flag.Set("v", "1")
 	flag.Parse()
 
 	glog.Infof("Welcome to the r/place %s map explorer!", *year)
@@ -132,7 +122,7 @@ func serve(futureDataset *gsync.Future[*dataset.Dataset]) {
 		glog.Exitf("Failed to listen on %q: %s", *addr, err)
 	}
 	glog.Infof("Serving HTTP on http://%s", lis.Addr())
-	glog.V(2).Infof(" - Debug: http://%s/debug/pprof", lis.Addr())
+	glog.V(2).Infof("Debug URL: http://%s/debug/pprof", lis.Addr())
 
 	glog.Exitf("HTTP Serve exited: %s", http.Serve(lis, nil))
 }

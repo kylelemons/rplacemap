@@ -69,7 +69,7 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 		chunks      = make(chan chunkSource, 2*len(src.URLs))
 		errors      = make(chan errorSource, len(src.URLs))
 		done        = make(chan struct{})
-		progressBar = new(progress.Bar)
+		progressBar = progress.NewBar(progress.Bytes)
 	)
 
 	var wg sync.WaitGroup
@@ -90,8 +90,7 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 	chunkSlice, chunkStride := src.makeChunks()
 	out := Dataset{
 		Version:     Version,
-		Width:       src.CanvasSize,
-		Height:      src.CanvasSize,
+		Size:        src.CanvasSize,
 		Epoch:       time.Date(src.Year, 4, 1, 0, 0, 0, 0, time.UTC),
 		ChunkStride: chunkStride,
 		Chunks:      chunkSlice,
@@ -99,11 +98,15 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 	prep := partialDataset{
 		Dataset: &out,
 		users:   make(map[string]int),
-		colors:  make(map[color.RGBA]int),
+		colors: map[color.RGBA]int{
+			color.RGBA{R: 0, G: 0, B: 0, A: 0}:         0, // Transparent (default)
+			color.RGBA{R: 0, G: 0, B: 0, A: 255}:       1, // Black
+			color.RGBA{R: 255, G: 255, B: 255, A: 255}: 2, // White
+		},
 	}
 	defer prep.finalize()
 
-	printProgress := time.NewTicker(5 * time.Second)
+	printProgress := time.NewTicker(30 * time.Second)
 	defer printProgress.Stop()
 
 	var (
@@ -157,7 +160,7 @@ func (s *Source) download(ctx context.Context, source int, u *url.URL, chunks ch
 	if resp.ContentLength <= 0 {
 		return fmt.Errorf("GET %q returned unknown Content-Length", u)
 	}
-	glog.V(1).Infof("[%02d] Starting download of %q", source, u)
+	glog.V(2).Infof("[%02d] Starting download of %q", source, u)
 
 	// Spread out downloads and logs a tiny bit
 	time.Sleep(time.Duration(source) * 50 * time.Millisecond)
@@ -209,7 +212,7 @@ func (s *Source) download(ctx context.Context, source int, u *url.URL, chunks ch
 		return fmt.Errorf("downloading %q: %w", u, err)
 	}
 
-	glog.V(1).Infof("[%02d] Shard downloaded (%d records, %.2fMiB, took %s)", source,
+	glog.V(2).Infof("[%02d] Shard downloaded (%d records, %.2fMiB, took %s)", source,
 		lineno, float64(resp.ContentLength)/(1<<20), time.Since(start).Truncate(time.Second))
 
 	return nil
