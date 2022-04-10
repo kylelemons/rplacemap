@@ -40,7 +40,6 @@ func parseLine2022(line string) ([]RawRecord, error) {
 	if len(xStr) == 0 || len(yStr) == 0 || len(colorStr) == 0 {
 		return nil, nil
 	}
-	// TODO: implement admin rect
 
 	ts, err := time.Parse(TimestampLayout, tsStr)
 	if err != nil {
@@ -58,6 +57,9 @@ func parseLine2022(line string) ([]RawRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("color %q invalid: %s", colorStr, err)
 	}
+	if len(fields) == 7 {
+		return adminRect(fields, x, y, ts, userHash, col)
+	}
 
 	return []RawRecord{{
 		Timestamp: ts,
@@ -66,6 +68,45 @@ func parseLine2022(line string) ([]RawRecord, error) {
 		Y:         y,
 		Color:     col,
 	}}, nil
+}
+
+func adminRect(fields []string, x0, y0 int, ts time.Time, userHash string, col color.RGBA) ([]RawRecord, error) {
+	var (
+		xStr, yStr = fields[5], fields[6]
+	)
+	xStr = strings.Trim(xStr, `"`)
+	yStr = strings.Trim(yStr, `"`)
+
+	x1, err := strconv.Atoi(xStr)
+	if err != nil {
+		return nil, fmt.Errorf("x2 coordinate %q invalid: %s", xStr, err)
+	}
+	y1, err := strconv.Atoi(yStr)
+	if err != nil {
+		return nil, fmt.Errorf("y2 coordinate %q invalid: %s", yStr, err)
+	}
+
+	// Normalize rect so we can iterate
+	if x0 > x1 {
+		x0, x1 = x1, x0
+	}
+	if y0 > y1 {
+		y0, y1 = y1, y0
+	}
+
+	records := make([]RawRecord, 0, (x1-x0)*(y1-y0))
+	for x := x0; x <= x1; x++ {
+		for y := y0; y <= y1; y++ {
+			records = append(records, RawRecord{
+				Timestamp: ts,
+				UserHash:  userHash,
+				X:         x,
+				Y:         y,
+				Color:     col,
+			})
+		}
+	}
+	return records, nil
 }
 
 const header2022 = "timestamp,user_id,pixel_color,coordinate"
