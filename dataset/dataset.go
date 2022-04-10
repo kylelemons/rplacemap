@@ -3,180 +3,230 @@ package dataset
 import (
 	"bufio"
 	"compress/gzip"
-	"encoding/base64"
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"image/color"
-	"io"
-	"net/http"
-	"net/url"
+	"math"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang/glog"
 )
 
-type Record struct {
-	UnixMillis int64
-	UserHash   [16]byte // pseudonymized user identifier
-	X, Y       int16    // coordinates, can represent +/-32k
-	Color      uint8    // 16-color palette
+type RawRecord struct {
+	Timestamp time.Time
+	UserHash  string // pseudonymized user identifier
+	X, Y      int
+	Color     color.RGBA
 }
 
 const (
-	FileSuffix     = ".gob.gz"
-	RequiredHeader = "ts,user_hash,x_coordinate,y_coordinate,color"
+	FileSuffix = ".gob.gz"
 )
 
-func Download(outputFile string, datasetURL *url.URL) ([]Record, error) {
+const Version = "rplacemap-encoding-v2"
+
+type Dataset struct {
+	Version string // encoding version, should match Version
+
+	// Global data
+	Size    int           // Number of horizontal and vertical pixels
+	Palette color.Palette // Color indices
+
+	// Encoding metadata
+	Epoch       time.Time // Base time (t0)
+	Start, End  time.Time // First and final pixel place timestamp
+	ChunkStride int       // The number of chunks per row (to avoid repeated computation)
+	UserIDs     []string  // User IDs by User Index
+
+	// Chunked data for localized processing
+	Chunks []Chunk // 256x256-pixel chunks
+}
+
+func (d *Dataset) At(row, col int) []PixelEvent {
+	y, cy, x, cx := row/256, row%256, col/256, col%256
+	return d.Chunks[y*d.ChunkStride+x].Pixels[cy][cx]
+}
+
+func (d *Dataset) TimeAfter(deltaMills int32) time.Time {
+	return d.Epoch.Add(time.Duration(deltaMills) * time.Millisecond)
+}
+
+func (d *Dataset) SaveTo(outputFile string) error {
 	if !strings.HasSuffix(outputFile, FileSuffix) {
-		return nil, fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
+		return fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
 	}
+	glog.Infof("Saving dataset...")
 
-	// TODO: write to tempfile and then move?
-
-	f, err := os.Create(outputFile)
+	start := time.Now()
+	tempFile, err := d.writeTemp()
 	if err != nil {
-		return nil, fmt.Errorf("creating output file: %w", err) // contains filename
+		return fmt.Errorf("saving to temp: %w", err)
 	}
-	defer f.Close() // double close OK
+	defer os.Remove(tempFile) // make sure it's deleted if something goes wrong
+
+	if err := os.Rename(tempFile, outputFile); err != nil {
+		return fmt.Errorf("atomic file move: %w", err)
+	}
+	glog.Infof("Saved dataset to file in %s", time.Since(start).Truncate(time.Millisecond))
+	glog.Infof("  File: %s", outputFile)
+	return nil
+}
+
+func (d *Dataset) writeTemp() (string, error) {
+	start := time.Now()
+
+	f, err := os.CreateTemp("", "rplacemap-*"+FileSuffix)
+	if err != nil {
+		return "", fmt.Errorf("create temporary output file: %w", err)
+	}
+	defer f.Close()
 
 	writeBuffer := bufio.NewWriterSize(f, 10*1024)
+
 	compression, err := gzip.NewWriterLevel(writeBuffer, gzip.BestCompression)
 	if err != nil {
 		glog.Fatalf("NewWriterlevel: %s", err) // should never happen, means our level was wrong
 	}
+	defer compression.Close()
+
 	enc := gob.NewEncoder(compression)
 
-	start := time.Now()
-	resp, err := http.DefaultClient.Get(datasetURL.String())
-	if err != nil {
-		return nil, fmt.Errorf("starting download of %q: %w", datasetURL, err)
+	if err := enc.Encode(d); err != nil {
+		return "", fmt.Errorf("writing dataset to %q: %w", f.Name(), err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %q returned %q", datasetURL, resp.Status)
-	}
-	if resp.ContentLength <= 0 {
-		return nil, fmt.Errorf("GET %q returned unknown Content-Length", datasetURL)
-	}
-	glog.Infof("Starting download of %q", datasetURL)
-
-	// Progress updates:
-	//   Print a progress update periodically.
-	//   We should be loading a static file, so content length should be provided.
-	var processed, total int64 = 0, resp.ContentLength
-	progress := time.NewTicker(3 * time.Second)
-	defer progress.Stop()
-	printProgress := func() {
-		percent := processed * 100 / total
-		glog.Infof("Progress: %3d%% [% -50s]", percent, progressBar[:percent/2])
-	}
-
-	readBuffer := bufio.NewReaderSize(resp.Body, 10*1024)
-	lines := bufio.NewScanner(readBuffer)
-	var lineno int
-	var records []Record
-	for lines.Scan() {
-		line := lines.Text()
-		processed += int64(len(line)) + 1 // count the newline that isn't returned
-		lineno++
-
-		select {
-		case <-progress.C:
-			printProgress()
-		default:
-		}
-
-		if lineno == 1 {
-			if got, want := line, RequiredHeader; got != want {
-				return nil, fmt.Errorf("header mismatch, dataset contains %q, expecting %q", got, want)
-			}
-			glog.V(3).Infof("Header: %q", line)
-			continue
-		}
-
-		fields := strings.Split(line, ",")
-		if got, want := len(fields), 5; got != want {
-			return nil, fmt.Errorf("line %d: columns = %v, want %v: line %q", lineno, got, want, line)
-		}
-		var (
-			tsStr       = fields[0]
-			userHashStr = fields[1]
-			xStr, yStr  = fields[2], fields[3]
-			colorStr    = fields[4]
-		)
-		if len(xStr) == 0 || len(yStr) == 0 || len(colorStr) == 0 {
-			continue
-		}
-
-		const TimestampLayout = "2006-01-02 15:04:05.999 MST"
-		ts, err := time.Parse(TimestampLayout, tsStr)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: timestamp %q invalid: %s", lineno, tsStr, err)
-		}
-		userHash, err := base64.StdEncoding.DecodeString(userHashStr)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: user hash %q invalid: %s", lineno, userHashStr, err)
-		}
-		x, err := strconv.ParseInt(xStr, 10, 16)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: x coordinate %q invalid: %s", lineno, xStr, err)
-		}
-		y, err := strconv.ParseInt(yStr, 10, 16)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: y coordinate %q invalid: %s", lineno, yStr, err)
-		}
-		color, err := strconv.ParseUint(colorStr, 10, 8)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: color %q invalid: %s", lineno, colorStr, err)
-		}
-
-		rec := Record{
-			UnixMillis: ts.UnixNano() / 1e6,
-			UserHash:   *((*[16]byte)(userHash)),
-			X:          int16(x),
-			Y:          int16(y),
-			Color:      uint8(color),
-		}
-		if err := enc.Encode(rec); err != nil {
-			return nil, fmt.Errorf("line %d: record %d: encoding record: %w", lineno, records, err)
-		}
-		records = append(records, rec)
-	}
-	if err := lines.Err(); err != nil {
-		return nil, fmt.Errorf("downloading %q: %w", datasetURL, err)
-	}
-	if processed != total {
-		glog.Warningf("Processed %d/%d bytes; incomplete download?", processed, total)
-	}
-	printProgress() // everyone likes the 100% downloaded bit :)
-
-	compression.Comment = "r/place 2017 dataset"
+	compression.Comment = fmt.Sprintf("r/place %s dataset", d.Epoch.Year())
 	if err := compression.Close(); err != nil {
-		return nil, fmt.Errorf("finalizing gzip data: %w", err)
+		return "", fmt.Errorf("finalizing gzip data: %w", err)
 	}
 	if err := writeBuffer.Flush(); err != nil {
-		return nil, fmt.Errorf("flushing buffer to file %q: %w", outputFile, err)
+		return "", fmt.Errorf("flushing buffer to file %q: %w", f.Name(), err)
+	}
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("syncing temp file: %w", err) // contains filename
 	}
 	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("closing output file: %w", err) // contains filename
+		return "", fmt.Errorf("closing temp file: %w", err) // contains filename
 	}
+	glog.V(2).Infof("Wrote dataset to temp file in %s", time.Since(start).Truncate(time.Millisecond))
+	glog.V(2).Infof("  Temp: %s", f.Name())
 
-	sortByTime(records)
-	glog.Infof("Downloaded dataset (%.2fMiB, took %s)",
-		float64(total)/(1<<20), time.Since(start).Truncate(time.Second))
-	glog.Infof("  Wrote to: %s", outputFile)
-
-	return records, nil
+	return f.Name(), nil
 }
 
-func Load(filename string) ([]Record, error) {
+type partialDataset struct {
+	*Dataset
+	users  map[string]int
+	colors map[color.RGBA]int
+}
+
+func (d *partialDataset) add(rec RawRecord) {
+	if rec.Timestamp.After(d.End) {
+		d.End = rec.Timestamp
+	}
+	if _, ok := d.colors[rec.Color]; !ok {
+		d.colors[rec.Color] = len(d.colors)
+	}
+	if _, ok := d.users[rec.UserHash]; !ok {
+		d.users[rec.UserHash] = len(d.users)
+	}
+
+	x, y := rec.X/256, rec.Y/256
+	c := &d.Chunks[y*d.ChunkStride+x]
+
+	ev := PixelEvent{
+		DeltaMillis: int32(rec.Timestamp.Sub(d.Epoch).Milliseconds()),
+		UserIndex:   int32(d.users[rec.UserHash]),
+		ColorIndex:  uint8(d.colors[rec.Color]),
+	}
+
+	col, row := uint8(rec.X), uint8(rec.Y) // implicitly % 256
+	c.Pixels[row][col] = append(c.Pixels[row][col], ev)
+}
+
+func (d *partialDataset) finalize() {
+	start := time.Now()
+	defer func() {
+		glog.Infof("Dataset finalized in %s", time.Since(start).Truncate(time.Millisecond))
+	}()
+
+	// Sanity checks
+	if got, max := len(d.colors), 256; got > max {
+		glog.Fatalf("Color palette (%d) exceeds one byte (%d)", got, max)
+	}
+
+	// Prepare the lookup tables
+	d.UserIDs = make([]string, len(d.users))
+	for u, i := range d.users {
+		d.UserIDs[i] = u
+	}
+	d.Palette = make(color.Palette, len(d.colors))
+	for c, i := range d.colors {
+		d.Palette[i] = c
+	}
+
+	// Stats
+	var (
+		totalEvents int
+		first       int32 = math.MaxInt32
+	)
+
+	// Sort the events
+	for _, chunk := range d.Chunks {
+		for _, r := range chunk.Pixels {
+			for _, ev := range r {
+				if len(ev) == 0 {
+					continue
+				}
+
+				sort.Slice(ev, func(i, j int) bool {
+					if a, b := ev[i].DeltaMillis, ev[j].DeltaMillis; a != b {
+						return a < b
+					}
+					return false
+				})
+				totalEvents += len(r)
+				if ts := ev[0].DeltaMillis; ts < first {
+					first = ts
+				}
+			}
+		}
+	}
+
+	d.Start = d.Epoch.Add(time.Duration(first) * time.Millisecond)
+
+	logSummary(d.Dataset, totalEvents)
+}
+
+func logSummary(d *Dataset, totalEvents int) {
+	glog.Infof("Event details:")
+	glog.Infof("  Epoch:       %s", d.Epoch.Format(TimestampLayout))
+	glog.Infof("  First Pixel: %s", d.Start.Format(TimestampLayout))
+	glog.Infof("  Final Pixel: %s", d.End.Format(TimestampLayout))
+	glog.Infof("Canvas information:")
+	glog.Infof("  Canvas:  %d x %d pixels", d.Size, d.Size)
+	glog.Infof("  Palette: %d colors", len(d.Palette))
+	glog.Infof("  Chunks:  %d chunks (%d x %d)", len(d.Chunks), d.ChunkStride, d.ChunkStride)
+	glog.Infof("Dataset statistics:")
+	glog.Infof("  %d pixels placed", totalEvents)
+	glog.Infof("  %d users recorded", len(d.UserIDs))
+}
+
+type Chunk struct {
+	Width, Height int // Width and Height of the lines (since the edge chunks won't be complete)
+
+	Pixels [256][256][]PixelEvent // Ordered events grouped by pixel
+}
+
+type PixelEvent struct {
+	DeltaMillis int32 // Delta between Epoch and this event
+	UserIndex   int32 // Index into the user array
+	ColorIndex  uint8 // Palette color index
+}
+
+func Load(filename string) (*Dataset, error) {
 	if !strings.HasSuffix(filename, FileSuffix) {
 		return nil, fmt.Errorf("input file %q does not have required suffix %q", filename, FileSuffix)
 	}
@@ -196,45 +246,32 @@ func Load(filename string) ([]Record, error) {
 	dec := gob.NewDecoder(compression)
 
 	start := time.Now()
-	var records []Record
-	for {
-		var rec Record
-		if err := dec.Decode(&rec); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("decoding record %d: %w", len(records)+1, err)
-		}
-		records = append(records, rec)
+	defer func() {
+		glog.Infof("Dataset loaded in %s", time.Since(start).Truncate(time.Millisecond))
+	}()
+
+	var ds Dataset
+	if err := dec.Decode(&ds); err != nil {
+		return nil, fmt.Errorf("decoding dataset from %q: %w (run with --download to redownload)", filename, err)
+	}
+	if got, want := ds.Version, Version; got != want {
+		return nil, fmt.Errorf("version = %q, want %q (run with --download to redownload)", got, want)
 	}
 
-	sortByTime(records)
-	glog.Infof("Decoded %d records in %s", len(records), time.Since(start).Truncate(time.Millisecond))
-	return records, nil
+	var events int
+	for _, c := range ds.Chunks {
+		for _, row := range c.Pixels {
+			for _, ev := range row {
+				events += len(ev)
+			}
+		}
+	}
+
+	logSummary(&ds, events)
+	return &ds, nil
 }
 
-func sortByTime(records []Record) {
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].UnixMillis < records[j].UnixMillis
-	})
-}
-
-var progressBar = strings.Repeat("#", 50)
-
-var Palette = color.Palette{
-	0:  color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF},
-	1:  color.RGBA{R: 0xE4, G: 0xE4, B: 0xE4, A: 0xFF},
-	2:  color.RGBA{R: 0x88, G: 0x88, B: 0x88, A: 0xFF},
-	3:  color.RGBA{R: 0x22, G: 0x22, B: 0x22, A: 0xFF},
-	4:  color.RGBA{R: 0xFF, G: 0xA7, B: 0xD1, A: 0xFF},
-	5:  color.RGBA{R: 0xE5, G: 0x00, B: 0x00, A: 0xFF},
-	6:  color.RGBA{R: 0xE5, G: 0x95, B: 0x00, A: 0xFF},
-	7:  color.RGBA{R: 0xA0, G: 0x6A, B: 0x42, A: 0xFF},
-	8:  color.RGBA{R: 0xE5, G: 0xD9, B: 0x00, A: 0xFF},
-	9:  color.RGBA{R: 0x94, G: 0xE0, B: 0x44, A: 0xFF},
-	10: color.RGBA{R: 0x02, G: 0xBE, B: 0x01, A: 0xFF},
-	11: color.RGBA{R: 0x00, G: 0xE5, B: 0xF0, A: 0xFF},
-	12: color.RGBA{R: 0x00, G: 0x83, B: 0xC7, A: 0xFF},
-	13: color.RGBA{R: 0x00, G: 0x00, B: 0xEA, A: 0xFF},
-	14: color.RGBA{R: 0xE0, G: 0x4A, B: 0xFF, A: 0xFF},
-	15: color.RGBA{R: 0x82, G: 0x00, B: 0x80, A: 0xFF},
+func init() {
+	// Ensure RGBA can be used in color.Palette
+	gob.Register(color.RGBA{})
 }

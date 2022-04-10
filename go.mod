@@ -1,4 +1,4 @@
-module github.com/kylelemons/rplacemap
+module github.com/kylelemons/rplacemap/v2
 
 go 1.18
 
