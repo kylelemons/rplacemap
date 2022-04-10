@@ -17,6 +17,7 @@ import (
 
 type window struct {
 	Size                  int
+	CanvasSize            int
 	PixelData             [][]uint8
 	Palette               color.Palette
 	TileX, TileY          int
@@ -37,18 +38,23 @@ func (w window) Bounds() image.Rectangle {
 	return image.Rect(x0, y0, x1, y1)
 }
 
-func clamp(v, max int) int {
-	if v > max {
-		return max
-	}
-	return v
+var transparentWhite = color.RGBA{
+	R: 255,
+	G: 255,
+	B: 255,
+	A: 0,
 }
 
 func (w window) At(x, y int) color.Color {
 	pX := x * w.GlobalScale / w.PixelScale
 	pY := y * w.GlobalScale / w.PixelScale
 
-	idx := w.PixelData[pY%w.Size][pX%w.Size]
+	if pY < 0 || pX < 0 || pY >= w.CanvasSize || pX >= w.CanvasSize {
+		return transparentWhite
+	}
+
+	// idx := w.PixelData[pY%w.Size][pX%w.Size]
+	idx := w.PixelData[pY][pX]
 	return w.Palette[idx]
 }
 
@@ -59,6 +65,7 @@ var tilePath = regexp.MustCompile(`^/tiles/(\d+)_(\d+)_z(\d+)_(\d+)x(\d+).png$`)
 type tileData struct {
 	pixels      [][]uint8
 	palette     color.Palette
+	canvasSize  int
 	globalScale int
 }
 
@@ -101,7 +108,7 @@ func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
 		}
 		d.pixels = pixels
 		d.palette = ds.Palette
-
+		d.canvasSize = ds.Size
 		d.globalScale = ds.ChunkStride // works because chunks are also 256x256
 
 		glog.Infof("Tile data ready (%dx%d)", size, size)
@@ -140,6 +147,7 @@ func Handler(futureDataset *gsync.Future[*dataset.Dataset]) http.HandlerFunc {
 
 		win := &window{
 			Size:        len(data.pixels),
+			CanvasSize:  data.canvasSize,
 			PixelData:   data.pixels,
 			Palette:     data.palette,
 			TileX:       x,

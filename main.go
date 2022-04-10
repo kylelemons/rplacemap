@@ -15,6 +15,7 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/kylelemons/rplacemap/v2/dataset"
+	"github.com/kylelemons/rplacemap/v2/details"
 	"github.com/kylelemons/rplacemap/v2/internal/gsync"
 	"github.com/kylelemons/rplacemap/v2/static"
 	"github.com/kylelemons/rplacemap/v2/tiles"
@@ -40,6 +41,14 @@ func main() {
 
 	glog.Infof("Welcome to the r/place %s map explorer!", *year)
 
+	lis, err := net.Listen("tcp", *addr)
+	if err != nil {
+		glog.Exitf("Failed to listen on %q: %s", *addr, err)
+	}
+	glog.Infof("Serving HTTP on http://%s", lis.Addr())
+	glog.V(2).Infof("Debug URL: http://%s/debug/pprof", lis.Addr())
+	glog.Info()
+
 	futureDataset := gsync.FutureOf[*dataset.Dataset]()
 	go func() {
 		if _, err := futureDataset.Provide(loadDataset()); err != nil {
@@ -47,7 +56,7 @@ func main() {
 		}
 	}()
 
-	serve(futureDataset)
+	serve(lis, futureDataset)
 }
 
 func loadDataset() (*dataset.Dataset, error) {
@@ -95,7 +104,7 @@ func loadDataset() (*dataset.Dataset, error) {
 	return loaded, nil
 }
 
-func serve(futureDataset *gsync.Future[*dataset.Dataset]) {
+func serve(lis net.Listener, futureDataset *gsync.Future[*dataset.Dataset]) {
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
 		defer cancel()
@@ -114,15 +123,10 @@ func serve(futureDataset *gsync.Future[*dataset.Dataset]) {
 	http.HandleFunc("/render/timelapse.apng", renderTimelapse)
 	http.HandleFunc("/render/timelapse.gif", renderTimelapse)
 
+	http.Handle("/details/pixel/events.json", details.PixelEvents(futureDataset))
+
 	http.Handle("/static/", static.Handler(*dev))
 	http.Handle("/", http.RedirectHandler("/static/index.html", http.StatusTemporaryRedirect))
-
-	lis, err := net.Listen("tcp", *addr)
-	if err != nil {
-		glog.Exitf("Failed to listen on %q: %s", *addr, err)
-	}
-	glog.Infof("Serving HTTP on http://%s", lis.Addr())
-	glog.V(2).Infof("Debug URL: http://%s/debug/pprof", lis.Addr())
 
 	glog.Exitf("HTTP Serve exited: %s", http.Serve(lis, nil))
 }

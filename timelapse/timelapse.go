@@ -71,6 +71,7 @@ func writeBuffer(w http.ResponseWriter, ctype string, buf *bytes.Buffer) {
 
 func renderFrames(ds *dataset.Dataset, frameAggregation time.Duration) (frames []*image.Paletted) {
 	start := time.Now()
+	glog.Infof("Rendering timelapse...")
 	defer func() {
 		glog.Infof("Timelapse complete: rendered %d frames in %s",
 			len(frames), time.Since(start).Truncate(time.Millisecond))
@@ -86,7 +87,6 @@ func renderFrames(ds *dataset.Dataset, frameAggregation time.Duration) (frames [
 			dbg += len(pending[r][c])
 		}
 	}
-	glog.Infof("DEBUG: %d queues", dbg)
 
 	dbg = 0
 	for _, c := range ds.Chunks {
@@ -96,7 +96,6 @@ func renderFrames(ds *dataset.Dataset, frameAggregation time.Duration) (frames [
 			}
 		}
 	}
-	glog.Infof("DEBUG: %d queues without At", dbg)
 
 	bar := progress.NewBar(progress.Counter)
 	bar.AddTotal(int64(ds.End.Sub(ds.Epoch) / frameAggregation))

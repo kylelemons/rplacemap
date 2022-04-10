@@ -99,9 +99,8 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 		Dataset: &out,
 		users:   make(map[string]int),
 		colors: map[color.RGBA]int{
-			color.RGBA{R: 0, G: 0, B: 0, A: 0}:         0, // Transparent (default)
+			color.RGBA{R: 255, G: 255, B: 255, A: 255}: 0, // White (default)
 			color.RGBA{R: 0, G: 0, B: 0, A: 255}:       1, // Black
-			color.RGBA{R: 255, G: 255, B: 255, A: 255}: 2, // White
 		},
 	}
 	defer prep.finalize()
@@ -118,7 +117,7 @@ func Download(ctx context.Context, src Source) (*Dataset, error) {
 		case <-done:
 			// Everybody loves the 100% bar :)
 			glog.Infof("Progress: %s", progressBar)
-			glog.Infof("Download complete after %s", time.Since(start).Truncate(time.Second))
+			glog.Infof("Download complete after %s, finalizing...", time.Since(start).Truncate(time.Second))
 			return &out, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()

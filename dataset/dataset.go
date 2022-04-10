@@ -50,17 +50,39 @@ func (d *Dataset) At(row, col int) []PixelEvent {
 	return d.Chunks[y*d.ChunkStride+x].Pixels[cy][cx]
 }
 
+func (d *Dataset) TimeAfter(deltaMills int32) time.Time {
+	return d.Epoch.Add(time.Duration(deltaMills) * time.Millisecond)
+}
+
 func (d *Dataset) SaveTo(outputFile string) error {
 	if !strings.HasSuffix(outputFile, FileSuffix) {
 		return fmt.Errorf("output file %q does not have required suffix %q", outputFile, FileSuffix)
 	}
 	glog.Infof("Saving dataset...")
 
-	f, err := os.Create(outputFile)
+	start := time.Now()
+	tempFile, err := d.writeTemp()
 	if err != nil {
-		return fmt.Errorf("creating output file: %w", err) // contains filename
+		return fmt.Errorf("saving to temp: %w", err)
 	}
-	defer f.Close() // double close OK
+	defer os.Remove(tempFile) // make sure it's deleted if something goes wrong
+
+	if err := os.Rename(tempFile, outputFile); err != nil {
+		return fmt.Errorf("atomic file move: %w", err)
+	}
+	glog.Infof("Saved dataset to file in %s", time.Since(start).Truncate(time.Millisecond))
+	glog.Infof("  File: %s", outputFile)
+	return nil
+}
+
+func (d *Dataset) writeTemp() (string, error) {
+	start := time.Now()
+
+	f, err := os.CreateTemp("", "rplacemap-*"+FileSuffix)
+	if err != nil {
+		return "", fmt.Errorf("create temporary output file: %w", err)
+	}
+	defer f.Close()
 
 	writeBuffer := bufio.NewWriterSize(f, 10*1024)
 
@@ -72,24 +94,26 @@ func (d *Dataset) SaveTo(outputFile string) error {
 
 	enc := gob.NewEncoder(compression)
 
-	writeStart := time.Now()
 	if err := enc.Encode(d); err != nil {
-		return fmt.Errorf("writing dataset to %q: %w", outputFile, err)
+		return "", fmt.Errorf("writing dataset to %q: %w", f.Name(), err)
 	}
 	compression.Comment = fmt.Sprintf("r/place %s dataset", d.Epoch.Year())
 	if err := compression.Close(); err != nil {
-		return fmt.Errorf("finalizing gzip data: %w", err)
+		return "", fmt.Errorf("finalizing gzip data: %w", err)
 	}
 	if err := writeBuffer.Flush(); err != nil {
-		return fmt.Errorf("flushing buffer to file %q: %w", outputFile, err)
+		return "", fmt.Errorf("flushing buffer to file %q: %w", f.Name(), err)
+	}
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("syncing temp file: %w", err) // contains filename
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing output file: %w", err) // contains filename
+		return "", fmt.Errorf("closing temp file: %w", err) // contains filename
 	}
-	glog.Infof("Wrote dataset to file in %s", time.Since(writeStart).Truncate(time.Millisecond))
-	glog.Infof("  File: %s", outputFile)
+	glog.V(2).Infof("Wrote dataset to temp file in %s", time.Since(start).Truncate(time.Millisecond))
+	glog.V(2).Infof("  Temp: %s", f.Name())
 
-	return nil
+	return f.Name(), nil
 }
 
 type partialDataset struct {
@@ -178,16 +202,16 @@ func (d *partialDataset) finalize() {
 
 func logSummary(d *Dataset, totalEvents int) {
 	glog.Infof("Event details:")
-	glog.Infof("  Epoch:       %s", d.Epoch)
-	glog.Infof("  First Pixel: %s", d.Start)
-	glog.Infof("  Final Pixel: %s", d.End)
+	glog.Infof("  Epoch:       %s", d.Epoch.Format(TimestampLayout))
+	glog.Infof("  First Pixel: %s", d.Start.Format(TimestampLayout))
+	glog.Infof("  Final Pixel: %s", d.End.Format(TimestampLayout))
 	glog.Infof("Canvas information:")
 	glog.Infof("  Canvas:  %d x %d pixels", d.Size, d.Size)
 	glog.Infof("  Palette: %d colors", len(d.Palette))
 	glog.Infof("  Chunks:  %d chunks (%d x %d)", len(d.Chunks), d.ChunkStride, d.ChunkStride)
 	glog.Infof("Dataset statistics:")
-	glog.Infof("  % 7d pixels placed", totalEvents)
-	glog.Infof("  % 7d users recorded", len(d.UserIDs))
+	glog.Infof("  %d pixels placed", totalEvents)
+	glog.Infof("  %d users recorded", len(d.UserIDs))
 }
 
 type Chunk struct {
